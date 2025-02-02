@@ -1,0 +1,15 @@
+services:
+  renamarr:
+    build: ./
+    environment:
+      - SONARR_API_URL=
+      - SONARR_API_KEY=
+      - QB_HOST=
+      - QB_USERNAME=
+      - QB_PASSWORD=
+      - LINK_FS=
+      # - LOG_LEVEL=DEBUG # DEBUG or INFO (Defaults to INFO)
+    ports:
+      - 8000:8000
+    volumes:
+      - /media:/media # Must be the drive that qBittorrent & Sonarr use
