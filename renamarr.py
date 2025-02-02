@@ -4,11 +4,11 @@ import requests
 import qbittorrentapi
 from fastapi import FastAPI, Request
 
-SONARR_API_URL = ""
-SONARR_API_KEY = ""
-QB_HOST = ""
-QB_USERNAME = ""
-QB_PASSWORD = ""
+SONARR_API_URL = os.getenv('SONARR_API_URL')
+SONARR_API_KEY = os.getenv('SONARR_API_KEY')
+QB_HOST = os.getenv('QB_HOST')
+QB_USERNAME = os.getenv('QB_USERNAME')
+QB_PASSWORD = os.getenv('QB_PASSWORD')
 
 SONARR_API_URL = SONARR_API_URL + "/api/v3"
 
