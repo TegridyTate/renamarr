@@ -1,126 +1,51 @@
 import os
-import logging
-from flask import Flask, request, jsonify
+import time
 import requests
-from qbittorrentapi import Client, LoginFailed
+import qbittorrentapi
+from fastapi import FastAPI, Request
 
-app = Flask(__name__)
+SONARR_API_URL = ""
+SONARR_API_KEY = ""
+QB_HOST = ""
+QB_USERNAME = ""
+QB_PASSWORD = ""
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+SONARR_API_URL = SONARR_API_URL + "/api/v3"
 
-# Environment variables
-SONARR_API_KEY = os.getenv('SONARR_API_KEY')
-SONARR_URL = os.getenv('SONARR_URL')
-QBITTORRENT_HOST = os.getenv('QBITTORRENT_HOST')
-QBITTORRENT_USERNAME = os.getenv('QBITTORRENT_USERNAME')
-QBITTORRENT_PASSWORD = os.getenv('QBITTORRENT_PASSWORD')
-DOWNLOAD_PATH = os.getenv('DOWNLOAD_PATH')
-PORT = os.getenv('PORT', 12345)
+app = FastAPI()
 
-def get_qbittorrent_client():
-    """Connect to qBittorrent and return the client."""
-    client = Client(
-        host=QBITTORRENT_HOST,
-        username=QBITTORRENT_USERNAME,
-        password=QBITTORRENT_PASSWORD
-    )
-    try:
-        client.auth_log_in()
-    except LoginFailed as e:
-        logger.error("Failed to log in to qBittorrent: %s", e)
-        raise
-    return client
+# Run with Uvicorn
+# uvicorn renamarr:app --host 0.0.0.0 --port 8000
 
-@app.route('/sonarr_webhook', methods=['POST'])
-def sonarr_webhook():
-    data = request.json
-    logger.info("Received webhook data: %s", data)
+@app.post("/sonarr-webhook")
+async def sonarr_webhook(request: Request):
+    payload = await request.json()
+    download_id = payload.get("downloadId")
+    series_path = payload.get("series", {}).get("path")
+    series_id = payload.get("episodes", [{}])[0].get("seriesId")
+    season_number = str(payload.get("episodes", [{}])[0].get("seasonNumber", "1")).zfill(2)
+    season_path = os.path.join(series_path, f"Season {season_number}")
+    os.makedirs(season_path, exist_ok=True)
+    time.sleep(30) # This is bad... Should check for status "downloading" from Sonarr queue, just haven't yet
+    qbt_client = qbittorrentapi.Client(host=QB_HOST, username=QB_USERNAME, password=QB_PASSWORD)
+    qbt_client.auth_log_in()
+    torrent_info = qbt_client.torrents_info(torrent_hashes=download_id)
+    files = qbt_client.torrents_files(torrent_hash=download_id)
+    file_name, full_path = None, None
+    for file in files:
+        if file.name.endswith('.mkv'): # Also bad
+            full_path = os.path.join(torrent_info[0].save_path, file.name)
+            file_name = os.path.basename(file.name)
+            break   
+    hardlink_path = os.path.join(season_path, file_name)
+    os.link(full_path, hardlink_path)
+    headers = {"X-Api-Key": SONARR_API_KEY, "Content-Type": "application/json"}
+    refresh_resp = requests.post(f"{SONARR_API_URL}/command", json={"name": "refreshSeries", "seriesId": series_id}, headers=headers)
+    time.sleep(5) # Seems to kill it-self if I don't wait a few seconds
+    rename_resp = requests.get(f"{SONARR_API_URL}/rename?seriesId={series_id}", headers=headers)
+    rename_resp.raise_for_status()
+    file_id = rename_resp.json()[0].get("episodeFileId")
+    rename_command = requests.post(f"{SONARR_API_URL}/command", json={"name": "renameFiles", "seriesId": series_id, "files": [file_id]}, headers=headers)
+    rename_command.raise_for_status()
 
-    # Check if event is Grab
-    if data.get('eventType') != 'Grab':
-        logger.info("Ignoring non-Grab event: %s", data.get('eventType'))
-        return jsonify({'status': 'ignored', 'reason': 'not a Grab event'}), 200
-
-    # Extract series ID and download ID (torrent hash)
-    try:
-        series_id = data['series']['id']
-        download_id = data['downloadId'].lower()
-    except KeyError as e:
-        logger.error("Missing key in webhook data: %s", e)
-        return jsonify({'status': 'error', 'message': f'Missing key: {e}'}), 400
-
-    # Fetch rename data from Sonarr
-    headers = {'X-Api-Key': SONARR_API_KEY}
-    rename_url = f"{SONARR_URL}/api/v3/rename"
-    params = {'seriesId': series_id}
-    try:
-        response = requests.get(rename_url, headers=headers, params=params)
-        response.raise_for_status()
-        rename_data = response.json()
-    except requests.exceptions.RequestException as e:
-        logger.error("Failed to fetch rename data from Sonarr: %s", e)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-    logger.info("Rename data: %s", rename_data)
-
-    # Process each rename entry
-    qbt_client = None
-    try:
-        qbt_client = get_qbittorrent_client()
-        torrent = qbt_client.torrents_info(torrent_hashes=download_id)
-        if not torrent:
-            logger.error("Torrent with hash %s not found in qBittorrent", download_id)
-            return jsonify({'status': 'error', 'message': 'Torrent not found'}), 404
-        torrent = torrent[0]
-
-        # Get the list of files in the torrent
-        torrent_files = torrent.files
-
-        for entry in rename_data:
-            existing_path = entry.get('existingPath')
-            new_path = entry.get('newPath')
-
-            if not existing_path or not new_path:
-                logger.warning("Skipping rename entry with missing paths: %s", entry)
-                continue
-
-            # Compute relative path within the download directory
-            if not existing_path.startswith(DOWNLOAD_PATH):
-                logger.warning("Existing path %s is not in download path %s", existing_path, DOWNLOAD_PATH)
-                continue
-            relative_path = os.path.relpath(existing_path, DOWNLOAD_PATH)
-
-            # Get new filename from new_path
-            new_filename = os.path.basename(new_path)
-            new_relative_path = os.path.join(os.path.dirname(relative_path), new_filename)
-
-            # Find the file in the torrent that matches relative_path
-            for file in torrent_files:
-                if file.name == relative_path:
-                    logger.info("Renaming %s to %s", file.name, new_relative_path)
-                    try:
-                        qbt_client.torrents_rename_file(
-                            torrent_hash=download_id,
-                            file_id=file.id,
-                            new_file_name=new_relative_path
-                        )
-                        logger.info("Successfully renamed file")
-                    except Exception as e:
-                        logger.error("Failed to rename file %s: %s", file.name, e)
-                    break  # Assuming one match per file
-            else:
-                logger.warning("No file found in torrent matching %s", relative_path)
-
-        return jsonify({'status': 'success'}), 200
-
-    except Exception as e:
-        logger.error("An error occurred: %s", e, exc_info=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-    finally:
-        if qbt_client:
-            qbt_client.auth_log_out()
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=PORT, debug=False)
+    return {"message": "Webhook processed", "status": "success"}
