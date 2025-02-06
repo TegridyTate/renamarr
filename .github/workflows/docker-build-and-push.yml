@@ -27,5 +27,5 @@ jobs:
       with:
         push: true
         tags: |
-          tegridytate/autobrr-monitor:latest
-          tegridytate/autobrr-monitor:${{ github.sha }}
+          tegridytate/renamarr:latest
+          tegridytate/renamarr:${{ github.sha }}
